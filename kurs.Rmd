@@ -1,0 +1,490 @@
+---
+title: "kurs"
+author: "apopov"
+date: "16 05 2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+* Очищение данных по питону
+
+```{r include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(janeaustenr)
+library(stringr)
+library(tidytext)
+library(bnlearn)
+library(Rgraphviz)
+library(gRain)
+
+d1 <- read_csv("data/tag.python/pytags1.csv")      #макс. 50К строк с запроса
+d2 <- read_csv("data/tag.python/pytags2.csv")  
+d3 <- read_csv("data/tag.python/pytags3.csv")
+d4 <- read_csv("data/tag.python/pytags4.csv")
+d5 <- read_csv("data/tag.python/pytags5.csv")
+d6 <- read_csv("data/tag.python/pytags6.csv")
+d7 <- read_csv("data/tag.python/pytags7.csv")
+data = rbind(d1,d2,d3,d4,d5,d6,d7)
+data = unique(data) %>% arrange(date)
+rm(d1,d2,d3,d4,d5,d6,d7)
+
+# ленегда по энвайроменту:
+#   b... - байесовские сети
+#   d... - датасеты
+#   f... - фит
+#   st... - таблы сил связей
+```
+
+* Разбиение тэгов на длинный формат, фильтрация топ-20 тэгов
+
+```{r include=FALSE}
+datalong <- separate_rows(data, tags, sep = "><")
+datalong$tags = str_remove_all(datalong$tags, ">")
+datalong$tags = str_remove_all(datalong$tags, "<")
+
+ds_criteria = datalong %>%  group_by(tags) %>% count() %>% arrange(desc(n)) %>% head(28) %>% 
+filter(!tags %in% c("python","python-3.x","python-2.7","python-3.6","python-3.7"))
+       
+datalong = datalong %>% filter(tags %in% ds_criteria$tags)
+ds = as.data.frame(distinct(datalong)) %>% mutate(znac = 1) %>% spread(tags, znac, fill = 0)
+names(ds) = gsub('[[:punct:] ]+','',names(ds))
+
+ds[10:34] <- lapply(ds[10:34], as.factor)
+# ds[2] <- lapply(ds[2], as.factor)
+rm(datalong)
+```
+
+```{r echo=FALSE}
+ggplot(ds_criteria) + geom_bar(aes(x = tags, y = n), stat = "identity") + theme_void() +
+  theme(axis.text.x = element_text(angle = 45)) 
+```
+
+* Построение БС и плота силы связей
+
+```{r include=FALSE}
+bnpy = hc(ds[10:ncol(ds)], max.iter = 40)
+```
+
+```{r echo=FALSE}
+plot(bnpy)
+plot(hc(ds[10:34], max.iter = 10))
+plot(hc(ds[10:34], max.iter = 25))
+plot(hc(ds[10:34], max.iter = 50))
+```
+
+```{r include=FALSE}
+fit_bnpy <- bn.fit(bnpy, data = ds[10:ncol(ds)])
+
+st_bnpy = arc.strength(x = bnpy, data = ds[10:ncol(ds)]) 
+
+#ф-ция создания графика сил связей, арг - сеть и датасет сил связей
+stpl <- function(bn, st_ds) {
+  stth_pl = strength.plot(x = bn, strength = st_ds, render = F)
+  graph::nodeRenderInfo(stth_pl) <- list(cex = 1)
+  Rgraphviz::renderGraph(stth_pl)
+}
+
+stpl(bnpy, st_bnpy)
+```
+
+```{r echo=FALSE}
+st_bnpy = st_bnpy %>% mutate(prob = NA) %>% arrange(strength)
+st_bnpy[1,4]=cpquery(fit_bnpy, `keras` == 1, `tensorflow` == 1)*100
+st_bnpy[2,4]=cpquery(fit_bnpy, `pandas` == 1, `django` == 1)*100
+st_bnpy[3,4]=cpquery(fit_bnpy, `beautifulsoup` == 1, `webscraping` == 1)*100
+st_bnpy[4,4]=cpquery(fit_bnpy, `tensorflow` == 1, `pandas` == 1)*100
+st_bnpy[5,4]=cpquery(fit_bnpy, `tensorflow` == 1, `django` == 1)*100
+st_bnpy[6,4]=cpquery(fit_bnpy, `pandas` == 1, `flask` == 1)*100
+st_bnpy[7,4]=cpquery(fit_bnpy, `pandas` == 1, `tkinter` == 1)*100
+st_bnpy[8,4]=cpquery(fit_bnpy, `machinelearning` == 1, `scikitlearn` == 1)*100
+st_bnpy[9,4]=cpquery(fit_bnpy, `pandas` == 1, `opencv` == 1)*100
+st_bnpy[10,4]=cpquery(fit_bnpy, `matplotlib` == 1, `django` == 1)*100
+
+st_bnpy %>% arrange(strength)  %>% head(10)
+```
+
+Логика етсь в первой же паре: пандас-датафрейм ключевые понятия для работы с данными. Джанго, как иде, встечается совсеми пакетами и объектами. Керас и Тенсорфлоу - главные пакеты МЛ, а нампай - пакет для работы с векторами. При всём при этом высокие вероятности показали лишь пары pandas-gjango, pandas-dataframe и tensorflow-pandas.
+
+* Посмотрим на вероятности одной пары:
+
+```{r echo=TRUE}
+#Note that both cpquery and cpdist are based on Monte Carlo particle filters, and therefore they may return slightly different values on different runs.
+
+cpquery(fit_bnpy, pandas == 1, dataframe == 1)
+cpquery(fit_bnpy, dataframe == 1, pandas == 1)
+prop.table(table(cpdist(fit_bnpy, "pandas", (dataframe == 1))))
+```
+
+В постах с тегом пандас датаферейм встречается в ~25% случаях, наоборот - в ~81%. Можно предположить, что пакет пандас основан на работе с датафреймами и не только. Имеет смысл посмотреть на сеть для pandas+dataframe:
+
+```{r echo=FALSE}
+# baynet = function(var1, var2) {
+#   if(missing(var2)) {
+#         ds_p = ds %>% filter(var1 == 1) %>% select(-var1)
+#         bnpy_p <- hc(ds_p[10:ncol(ds_p)])
+#         st_p = arc.strength(x = bnpy_p, data = ds_p[10:ncol(ds_p)]) 
+#         pl_st_p = strength.plot(x = bnpy_p, strength = st_p, render = F) 
+#         graph::nodeRenderInfo(pl_st_p) <- list(cex = 1)
+#         Rgraphviz::renderGraph(pl_st_p)
+#     } else {
+#         ds_p = ds %>% filter(var1 == 1 & var2 == 1) %>% select(-var1, -var2)
+#         bnpy_p <- hc(ds_p[10:ncol(ds_p)]) 
+#         st_p = arc.strength(x = bnpy_p, data = ds_p[10:ncol(ds_p)]) 
+#         pl_st_p = strength.plot(x = bnpy_p, strength = st_p, render = F) 
+#         graph::nodeRenderInfo(pl_st_p) <- list(cex = 1)
+#         Rgraphviz::renderGraph(pl_st_p)  
+#         }
+#       
+# }
+
+ds_pdf = ds %>% filter(pandas == 1 & dataframe == 1) %>% select(-pandas, -dataframe, -keras, -opencv)
+bnpy_pdf <- hc(ds_pdf[10:ncol(ds_pdf)]) 
+plot(bnpy_pdf)
+st_pdf = arc.strength(x = bnpy_pdf, data = ds_pdf[10:ncol(ds_pdf)]) 
+stpl(bnpy_pdf, st_pdf)
+
+fit_pdf <- bn.fit(bnpy_pdf, data = ds_pdf[10:ncol(ds_pdf)])
+
+print(str_c("beautifulsoup and webscraping: ", cpquery(fit_pdf, beautifulsoup == 1, `webscraping` == 1)*100, "% in ", ds_pdf %>% filter(beautifulsoup == 1 & `webscraping` == 1) %>%  nrow(), " obs."))
+print(str_c("csv and numpy: ", cpquery(fit_pdf, csv == 1, numpy == 1)*100, "% in ", ds_pdf %>% filter(csv == 1 & `numpy` == 1) %>%  nrow(), " obs."))
+print(str_c("beautifulsoup and python-requests: ", cpquery(fit_pdf, beautifulsoup == 1, `pythonrequests` == 1)*100, "% in ", ds_pdf %>% filter(beautifulsoup == 1 & `pythonrequests` == 1) %>%  nrow(), " obs."))
+print(str_c("dictionary and list: ", cpquery(fit_pdf, dictionary == 1, list == 1)*100, "% in ", ds_pdf %>% filter(dictionary == 1 & `list` == 1) %>%  nrow(), " obs."))
+
+print(str_c("obs num: ", nrow(ds_pdf)))
+
+rm(ds_pdf, bnpy_pdf, fit_pdf, st_pdf)
+```
+
+Выделилось всего четыре связи, все нерепрезентативны из-за количества наблюдений python+pandas+dataframe+ещё_два_тег Может тогда попробуем не перескакивать к тройкам, а сконцентрируемся на паре питон+ что-то?
+
+Для этого я примерно прикинул классификацию тегов: 1 - библиотеки, 2 - объекты/сферы/понятия, 3 - остальное (джанго - иде..). Я не буду пользоваться этими вектоами (не уверен в правильности классификации), но буду понимать, к чему относится каждый тег.
+
+```{r eval=FALSE, include=FALSE}
+lib = as.vector(c("pandas", "numpy", "tensorflow", "matplotlib", "keras", "selenium", "opencv", "beautifulsoup", "scikitlearn", "pythonrequests", "pip", "pyspark", "scipy", "pytorch", "pythonrequests"))
+obj = as.vector(c("dataframe", "list", "machinelearning", "dictionary", "regex", "json", "csv", "webscraping", "html", "arrays", "string", "deeplearning", "loops", "datetime", "forloop", "function", "imageprocessing"))
+rest = as.vector(c("django", "flask", "tkinter", "jupyternotebook", "pyqt5", "sqlalchemy", "javascript", "mysql", "djangomodels", "excel", "anaconda", "pycharm", "djangorestframework", "pyqt", "pygame", "seleniumwebdriver", "amazonwebservices", "windows", "multithreading"))
+```
+
+* Попробуем проанализировать какието топовые теги.
+
+** pandas:
+
+```{r echo=FALSE}
+ds_p = ds %>% filter(pandas == 1) %>% select(-pandas)
+bnpy_p <- hc(ds_p[10:ncol(ds_p)]) 
+plot(bnpy_p)
+st_p = arc.strength(x = bnpy_p, data = ds_p[10:ncol(ds_p)]) 
+stpl(bnpy_p, st_p)
+
+fit_p <- bn.fit(bnpy_p, data = ds_p[10:ncol(ds_p)])
+st_p = st_p %>% mutate(prob = NA) %>% arrange(strength)
+
+# probobs = function(strength.dataset, fitted.model){
+#   
+#   state = 1 # note if the states are character then these need to be quoted
+#   event = paste('`',strength.dataset$from,'`'," == ", state, sep = "")
+#   evidence = paste('`',strength.dataset$to,'`'," == ", state, sep = "")
+#   
+#   set.seed(1) 
+#   for(i in 1:nrow(strength.dataset)) {
+#     qtxt = paste("cpquery(", fitted.model, ",", event[i], ",", evidence[i],")", sep = "")
+#     strength.dataset$prob[i] = eval(parse(text=qtxt))
+#  }
+# }
+# 
+# probobs(st_p, fit_p)
+
+# function below is almost working one!
+
+# probobs1 = function(sttable, fittedbn){
+#   evidence = setNames(replicate(nrow(sttable), '1', simplify = FALSE), sttable$to)
+#   for(i in 1:nrow(sttable)) {
+#     temp = cpdist(fittedbn, sttable$from[i], evidence[i], method="lw")
+#     w = attr(temp, "weights")  
+#     prob[i]=sum(w[temp==1])/ sum(w)} ;
+#   return(prob)
+# }
+# 
+# st_p$prob = probobs1(st_p, fit_p)
+
+evidence = setNames(replicate(nrow(st_p), "1", simplify = FALSE), st_p$to)
+
+for(i in 1:nrow(st_p)) {
+  temp = cpdist(fit_p, st_p$from[i], evidence[i], method="lw")
+  w = attr(temp, "weights")  
+  st_p$prob[i] = sum(w[temp=='1'])/ sum(w)
+}
+
+# st_p[1,4]=cpquery(fit_p, `beautifulsoup` == 1, `webscraping` == 1)
+# st_p[2,4]=cpquery(fit_p, `machinelearning` == 1, `scikitlearn` == 1)
+# st_p[3,4]=cpquery(fit_p, `dataframe` == 1, `matplotlib` == 1)
+# st_p[4,4]=cpquery(fit_p, `numpy` == 1, `arrays` == 1)
+# st_p[5,4]=cpquery(fit_p, `keras` == 1, `tensorflow` == 1)
+# 
+# st_p[1,5]=nrow(ds_p %>%  filter(`beautifulsoup` == 1 & `webscraping` == 1))
+# st_p[2,5]=nrow(ds_p %>%  filter(`machinelearning` == 1 & `scikitlearn` == 1))
+# st_p[3,5]=nrow(ds_p %>%  filter(`dataframe` == 1 & `matplotlib` == 1))
+# st_p[4,5]=nrow(ds_p %>%  filter(`numpy` == 1 & `arrays` == 1))
+# st_p[5,5]=nrow(ds_p %>%  filter(`keras` == 1 & `tensorflow` == 1))
+
+head(arrange(st_p, st_p$strength), 5)
+
+print(str_c("obs num: ", nrow(ds_p)))
+```
+
+** django:
+
+```{r echo=FALSE}
+ds_dj = ds %>% filter(django == 1) %>% select(-django)
+bnpy_dj <- hc(ds_dj[10:ncol(ds_dj)]) 
+plot(bnpy_dj)
+st_dj = arc.strength(x = bnpy_dj, data = ds_dj[10:ncol(ds_dj)]) 
+stpl(bnpy_dj, st_dj)
+
+fit_dj <- bn.fit(bnpy_dj, data = ds_dj[10:ncol(ds_dj)])
+st_dj = st_dj %>% mutate(prob = NA, obs = NA) %>% arrange(strength)
+#view(st_dj)
+
+st_dj[1,4]=cpquery(fit_dj, `keras` == 1, `tensorflow` == 1)
+st_dj[2,4]=cpquery(fit_dj, `dataframe` == 1, `pandas` == 1)
+st_dj[3,4]=cpquery(fit_dj, `pandas` == 1, `numpy` == 1)
+st_dj[4,4]=cpquery(fit_dj, `dictionary` == 1, `list` == 1)
+st_dj[5,4]=cpquery(fit_dj, `keras` == 1, `machinelearning` == 1)
+
+st_dj[1,5]=nrow(ds_dj %>%  filter(`keras` == 1 & `tensorflow` == 1))
+st_dj[2,5]=nrow(ds_dj %>%  filter(`dataframe` == 1 & `pandas` == 1))
+st_dj[3,5]=nrow(ds_dj %>%  filter(`pandas` == 1 & `numpy` == 1))
+st_dj[4,5]=nrow(ds_dj %>%  filter(`dictionary` == 1 & `list` == 1))
+st_dj[5,5]=nrow(ds_dj %>%  filter(`keras` == 1 & `machinelearning` == 1))
+
+head(arrange(st_dj, st_dj$strength), 5)
+
+print(str_c("obs num: ", nrow(ds_dj)))
+
+ds_tns = ds %>% filter(tensorflow == 1) %>% select(-tensorflow, -beautifulsoup , -selenium , -webscraping)
+bnpy_tns <- hc(ds_tns[10:ncol(ds_tns)]) 
+plot(bnpy_tns)
+st_tns = arc.strength(x = bnpy_tns, data = ds_tns[10:ncol(ds_tns)]) 
+stpl(bnpy_tns, st_tns)
+```
+
+Видно, что сила связй БС не коррелирует с процентной вероятностью появления связи. Нужен цикл для стабильного высчитывания вероятности.
+
+*for (i in 1:nrow(st_p)) {
+   st_p[i,4]=cpquery(fit_p, st_p[i,1] == 1, st_p[i,2] == 1)}*
+
+НЕ РАБОТАЕТ
+
+```{r eval=FALSE, include=FALSE}
+# for (i in 1:nrow(st_p)) {
+#   st_p[i,4]=cpquery(fit_p, st_p[i,1] == 1, st_p[i,2] == 1)
+# }
+```
+
+* Вернёмся к общему дс по пайтону. Топ 10 тегов по питону:
+
+```{r echo=FALSE}
+head(ds_criteria, 10)
+```
+
+* Топ пар по пйтону:
+
+```{r echo=FALSE}
+st_bnpy = st_bnpy %>%  mutate(obs = NA)
+st_bnpy[1,5]=nrow(ds %>% filter(`pandas` == 1 & `django` == 1))
+st_bnpy[2,5]=nrow(ds %>% filter(`keras` == 1 & `tensorflow` == 1))
+st_bnpy[3,5]=nrow(ds %>% filter(`pandas` == 1 & `dataframe` == 1))
+st_bnpy[4,5]=nrow(ds %>% filter(`beautifulsoup` == 1 & `webscraping` == 1))
+st_bnpy[5,5]=nrow(ds %>% filter(`pandas` == 1 & `flask` == 1))
+st_bnpy[6,5]=nrow(ds %>% filter(`pandas` == 1 & `tkinter` == 1))
+st_bnpy[7,5]=nrow(ds %>% filter(`django` == 1 & `numpy` == 1))
+st_bnpy[8,5]=nrow(ds %>% filter(`tensorflow` == 1 & `pandas` == 1))
+st_bnpy[9,5]=nrow(ds %>% filter(`pandas` == 1 & `selenium` == 1))
+st_bnpy[10,5]=nrow(ds %>% filter(`pandas` == 1 & `opencv` == 1))
+head(st_bnpy, 10)
+```
+
+* Теперь добавим репутацию в граф:
+
+```{r}
+ds %>% filter(reputation<50) %>%
+ggplot() + geom_histogram(aes(reputation), binwidth = 2)
+
+quantile(ds$reputation, c(0.25,0.5,0.75))
+ds_rep = ds
+ds_rep$reputation = ds_rep$reputation %>% cut(breaks = c(0,15,63,340,999999), labels = c("1","2","3","4")) %>%
+  as.factor()
+
+ds_rep1 = ds_rep %>% filter(reputation == 1)
+bnpy_rep1<- hc(ds_rep1[10:ncol(ds_rep1)])
+plot(bnpy_rep1)
+st_rep1 = arc.strength(x = bnpy_rep1, data = ds_rep1[10:ncol(ds_rep1)])
+stpl(bnpy_rep1, st_rep1)
+ds_rep4 = ds_rep %>% filter(reputation == 4)
+bnpy_rep4<- hc(ds_rep4[10:ncol(ds_rep4)])
+plot(bnpy_rep4)
+st_rep4 = arc.strength(x = bnpy_rep4, data = ds_rep4[10:ncol(ds_rep4)])
+stpl(bnpy_rep4, st_rep4)
+```
+
+* Сравним популярность связок для 1 и 4 квартилей репутации:
+
+```{r echo=FALSE}
+fit_rep1 <- bn.fit(bnpy_rep1, data = ds_rep1[10:ncol(ds_rep1)])
+fit_rep4 <- bn.fit(bnpy_rep4, data = ds_rep4[10:ncol(ds_rep4)])
+st_rep1 = st_rep1 %>% mutate(prob = NA) %>% arrange(strength)
+st_rep1[3,4]=cpquery(fit_rep1, `pandas` == 1, `django` == 1)
+st_rep1[4,4]=cpquery(fit_rep1, `beautifulsoup` == 1, `webscraping` == 1)
+st_rep1[2,4]=cpquery(fit_rep1, `pandas` == 1, `dataframe` == 1)
+st_rep1[1,4]=cpquery(fit_rep1, `keras` == 1, `tensorflow` == 1)
+st_rep1[5,4]=cpquery(fit_rep1, `pandas` == 1, `tkinter` == 1)
+st_rep4 = st_rep4 %>% mutate(prob = NA) %>% arrange(strength)
+st_rep4[2,4]=cpquery(fit_rep4, `pandas` == 1, `tensorflow` == 1)
+st_rep4[4,4]=cpquery(fit_rep4, `tensorflow` == 1, `flask` == 1)
+st_rep4[3,4]=cpquery(fit_rep4, `pandas` == 1, `dataframe` == 1)
+st_rep4[1,4]=cpquery(fit_rep4, `pandas` == 1, `django` == 1)
+st_rep4[5,4]=cpquery(fit_rep4, `tensorflow` == 1, `pandas` == 1)
+head(st_rep1,5)
+head(st_rep4,5)
+```
+
+
+#gRain::queryGrain
+
+* Репутация ансвера:
+
+```{r include=FALSE}
+d1 <- read_csv("data/tag.python/pyaa1.csv")      #макс. 50К строк с запроса
+d2 <- read_csv("data/tag.python/pyaa2.csv")  
+d3 <- read_csv("data/tag.python/pyaa3.csv")
+d4 <- read_csv("data/tag.python/pyaa4.csv")
+data1 = rbind(d1,d2,d3,d4)
+data1 = unique(data1) %>% arrange(date)
+rm(d1,d2,d3,d4)
+
+nrow(data1 %>% filter(aareputation<200))/nrow(data1)
+nrow(data1 %>% filter(aareputation>80000))/nrow(data1)
+
+aa = left_join(ds, data1, by = "aaid") %>% drop_na(aaid)
+rm(data1)
+```
+
+```{r include=FALSE}
+aa = aa[,c(1:9,38,37,10:34)] %>% rename(id = id.x, date = date.x) 
+aa = aa[!is.na(aa$aareputation),]
+
+#---------------------------------------
+
+aa %>% filter(aareputation < 60000 & aareputation>20000) %>% 
+ggplot() + geom_histogram(aes(aareputation), binwidth = 10) + labs(title = "all accepted answer reputation")
+aa %>% filter(aareputation<1500) %>% 
+ggplot() + geom_histogram(aes(aareputation), binwidth = 10) + labs(title = "accepted answer reputation <500")
+
+nrow(filter(aa,aa$aareputation<950))/nrow(aa)
+nrow(filter(aa,aa$aareputation>180000))/nrow(aa)
+
+quantile(aa$aareputation, c(0.25,0.5,0.75))
+#850 & 42330 
+
+class(aa$aareputation)
+
+aaq = aa
+  aaq$aareputation=cut(aaq$aareputation, breaks = c(0,850,42330,999999), labels = c("1","23","4"))
+  aaq1 = aaq %>%  filter(aareputation == 1)
+  aaq4 = aaq %>%  filter(aareputation == 4)
+```
+
+* для первого квартиля:
+
+```{r echo=FALSE}
+bnpy_aaq1 <- hc(aaq1[12:ncol(aaq1)]) 
+plot(bnpy_aaq1)
+st_aaq1 = arc.strength(x = bnpy_aaq1, data = aaq1[12:ncol(aaq1)]) 
+stpl(bnpy_aaq1, st_aaq1)
+
+fit_aaq1 <- bn.fit(bnpy_aaq1, data = aaq1[12:ncol(aaq1)])
+evidence = setNames(replicate(nrow(st_aaq1), "1", simplify = FALSE), st_aaq1$to)
+
+for(i in 1:nrow(st_aaq1)) {
+  temp = cpdist(fit_aaq1, st_aaq1$from[i], evidence[i], method="lw")
+  w = attr(temp, "weights")  
+  st_aaq1$prob[i] = sum(w[temp=='1'])/ sum(w)
+}
+```
+
+* для четвёртого квартиля:
+
+```{r echo=FALSE}
+bnpy_aaq4 <- hc(aaq4[12:ncol(aaq4)]) 
+plot(bnpy_aaq4)
+st_aaq4 = arc.strength(x = bnpy_aaq4, data = aaq4[12:ncol(aaq4)]) 
+stpl(bnpy_aaq4, st_aaq4)
+
+fit_aaq4 <- bn.fit(bnpy_aaq1, data = aaq1[12:ncol(aaq1)])
+evidence = setNames(replicate(nrow(st_aaq4), "1", simplify = FALSE), st_aaq4$to)
+
+for(i in 1:nrow(st_aaq4)) {
+  temp = cpdist(fit_aaq4, st_aaq4$from[i], evidence[i], method="lw")
+  w = attr(temp, "weights")  
+  st_aaq4$prob[i] = sum(w[temp=='1'])/ sum(w)
+}
+```
+
+* сравнение: первое из пары по 1му квартилю, второе - по 4му.  
+
+```{r echo=FALSE}
+head(arrange(st_aaq1, strength), 10)
+head(arrange(st_aaq4, strength), 10)
+compare(bnpy_aaq1, bnpy_aaq4)
+compare(bnpy_aaq1, bnpy_aaq4, arcs = TRUE)
+
+graphviz.compare(hc(aaq1[12:ncol(aaq1)], max.iter = 15),hc(aaq4[12:ncol(aaq4)], max.iter = 15))
+```
+- the true positive (tp) arcs, which appear both in target and in current
+- the false positive (fp) arcs, which appear in current but not in target;
+- the false negative (fn) arcs, which appear in target but not in current.
+
+То есть для 1го квартиля 2/3 вопросов встречаются в 4ом, а наоборот - только 1/2 вопросов. 
+
+<!-- # ```{r} -->
+<!-- # datalong <- separate_rows(data, tags, sep = "><") -->
+<!-- # datalong$tags = str_remove_all(datalong$tags, ">") -->
+<!-- # datalong$tags = str_remove_all(datalong$tags, "<") -->
+<!-- #  -->
+<!-- # ds_criteria = datalong %>%  group_by(tags) %>% count() %>% arrange(desc(n)) %>% head(28) %>%  -->
+<!-- # filter(!tags %in% c("python","python-3.x","python-2.7","python-3.6","python-3.7")) -->
+<!-- #         -->
+<!-- # datalong = datalong %>% filter(tags %in% ds_criteria$tags) -->
+<!-- # ``` -->
+<!-- #  -->
+<!-- # для курсовика -->
+<!-- #  -->
+<!-- # ```{r} -->
+<!-- # aa_xui = aa -->
+<!-- # aa %>% filter(views<2000) %>%  -->
+<!-- # ggplot() + geom_histogram(aes(views)) + labs(title = "all accepted answer reputation") -->
+<!-- #  -->
+<!-- # quantile(aa$aareputation, c(0.25,0.5,0.75)) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # aa_xui$views=cut(aa_xui$views, breaks = c(0,43,169,999999), labels = c("1","23","4")) -->
+<!-- # aa_xui$answers=cut(aa_xui$answers, breaks = c(0,1,2,99), labels = c("1","23","4")) -->
+<!-- # aa_xui$comments=cut(aa_xui$comments, breaks = c(0,1,3,999999), labels = c("1","23","4")) -->
+<!-- # aa_xui$views=cut(aa_xui$views, breaks = c(0,43,169,999999), labels = c("1","23","4")) -->
+<!-- # aa_xui$reputation=cut(aa_xui$reputation, breaks = c(0,35,566,999999), labels = c("1","23","4")) -->
+<!-- # aa_xui$aareputation=cut(aa_xui$aareputation, breaks = c(0,850,42330,999999), labels = c("1","23","4")) -->
+<!-- #  -->
+<!-- # aa_xui = aa_xui %>% select(score, views, answers, comments, reputation, aareputation) -->
+<!-- # aa_xui$comments = ifelse(is.na(aa_xui$comments),0,aa_xui$comments) -->
+<!-- #  -->
+<!-- # bnpy_xui <- hc(aa_xui)  -->
+<!-- # plot(bnpy_xui) -->
+<!-- # st_xui = arc.strength(x = bnpy_xui, data =aa_xui)  -->
+<!-- # stpl(bnpy_xui, st_xui) -->
+```
+
+
+
+
